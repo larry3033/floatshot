@@ -90,6 +90,11 @@ class Config:
 
     # -- construction ----------------------------------------------------
 
+    @staticmethod
+    def default_path() -> Path:
+        """config.json next to the program, so it travels with the folder."""
+        return Path(__file__).resolve().parent.parent / "config.json"
+
     @classmethod
     def load(cls, path: Path) -> "Config":
         """Load config from `path`, creating or repairing it as needed.
