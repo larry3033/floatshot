@@ -52,6 +52,18 @@ _CURSORS: dict[Edge, Qt.CursorShape] = {
 }
 
 
+def _with_alpha(color: QColor, alpha: int) -> QColor:
+    """`color` with its alpha replaced, leaving the RGB untouched.
+
+    Configured colours carry no usable alpha of their own -- the painted
+    alpha is computed per layer or multiplied by the fade -- so it is
+    overridden rather than blended in.
+    """
+    out = QColor(color)
+    out.setAlpha(max(0, min(255, alpha)))
+    return out
+
+
 class FloatWindow(QWidget):
     """A frameless always-on-top window showing one screenshot."""
 
@@ -161,6 +173,8 @@ class FloatWindow(QWidget):
         max_alpha = max(0, int(s["max_alpha"]))
         offset_y = float(s["offset_y"])
         radius = float(s["radius"])
+        falloff = float(s["falloff"])
+        color = QColor(s["color"])
         pad = self._pad
 
         if max_alpha <= 0 or pad <= 0:
@@ -172,12 +186,12 @@ class FloatWindow(QWidget):
         for i in range(layers):
             t = i / max(1, layers - 1)
             expand = pad * (1.0 - t)
-            alpha = int(max_alpha * t * t)
+            alpha = int(max_alpha * (t ** falloff))
             if alpha <= 0:
                 continue
             rect = base.adjusted(-expand, -expand, expand, expand)
             rect.translate(0, offset_y * (1.0 - t))
-            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.setBrush(_with_alpha(color, alpha))
             painter.drawRoundedRect(rect, radius, radius)
 
     def _paint_image(self, painter: QPainter) -> None:
@@ -192,15 +206,19 @@ class FloatWindow(QWidget):
         centre = self.close_button_center()
         radius = self._metrics.close_diameter / 2.0
         alpha = max(0.0, min(1.0, self._close_opacity))
+        disc_alpha = int(int(cb["disc_alpha"]) * alpha)
+        cross_alpha = int(int(cb["cross_alpha"]) * alpha)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(40, 40, 40, int(200 * alpha)))
+        painter.setBrush(_with_alpha(QColor(cb["disc_color"]), disc_alpha))
         painter.drawEllipse(centre, radius, radius)
 
-        # A white cross, drawn as two short strokes.
-        arm = radius * 0.38
-        painter.setPen(QPen(QColor(255, 255, 255, int(235 * alpha)),
-                            max(1.0, radius * 0.22)))
+        # The cross, drawn as two short strokes.
+        arm = radius * float(cb["cross_arm_ratio"])
+        painter.setPen(QPen(
+            _with_alpha(QColor(cb["cross_color"]), cross_alpha),
+            max(1.0, radius * float(cb["cross_stroke_ratio"])),
+        ))
         painter.drawLine(
             QPointF(centre.x() - arm, centre.y() - arm),
             QPointF(centre.x() + arm, centre.y() + arm),
@@ -268,12 +286,14 @@ class FloatWindow(QWidget):
     def _resize_by(self, delta: QPoint, modifiers: Qt.KeyboardModifier) -> None:
         assert self._press_geom is not None
         r = self._config.get("resize")
+        min_w = max(1, int(r["min_width"]))
+        min_h = max(1, int(r["min_height"]))
         lock_aspect = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
 
         x, y, w, h = apply_resize(
             self._press_geom, self._active_edge, delta.x(), delta.y(),
-            min_w=max(1, int(r["min_width"])),
-            min_h=max(1, int(r["min_height"])),
+            min_w=min_w,
+            min_h=min_h,
         )
 
         if lock_aspect:
@@ -292,6 +312,19 @@ class FloatWindow(QWidget):
                 img_w, img_h = fit_aspect_height(src_w, src_h, img_h)
             else:
                 img_w, img_h = fit_aspect_corner(src_w, src_h, img_w, img_h)
+
+            # apply_resize clamped the *window*, but re-deriving the size
+            # from aspect-fitted image dimensions can undo that: a very
+            # lopsided source shrinks the short side below the minimum. The
+            # clamp below happens in picture space so the ratio survives --
+            # both sides are grown by the same factor, whichever of the two
+            # minimums binds harder.
+            min_img_w = max(1, min_w - 2 * pad)
+            min_img_h = max(1, min_h - 2 * pad)
+            grow = max(min_img_w / img_w, min_img_h / img_h, 1.0)
+            if grow > 1.0:
+                img_w = max(min_img_w, math.ceil(img_w * grow))
+                img_h = max(min_img_h, math.ceil(img_h * grow))
 
             new_w = img_w + 2 * pad
             new_h = img_h + 2 * pad
