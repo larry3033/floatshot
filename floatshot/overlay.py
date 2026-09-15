@@ -6,14 +6,14 @@ and selection border can never appear in the resulting screenshot.
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from .config import Config
 from .dpi import ui_scale
-
-_HINT_SIZE = 12
 
 
 class SelectionOverlay(QWidget):
@@ -81,7 +81,8 @@ class SelectionOverlay(QWidget):
     def _paint_dim(self, painter: QPainter) -> None:
         """Darken everything except the selection."""
         cfg = self._config.get("overlay")
-        alpha = max(0, min(255, int(cfg["dim_alpha"])))
+        dim = QColor(cfg["dim_color"])
+        dim.setAlpha(max(0, min(255, int(cfg["dim_alpha"]))))
 
         path = QPainterPath()
         path.addRect(self.rect())
@@ -92,11 +93,11 @@ class SelectionOverlay(QWidget):
             path = path.subtracted(hole)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(path, QColor(0, 0, 0, alpha))
+        painter.fillPath(path, dim)
 
     def _paint_border(self, painter: QPainter, sel: QRect) -> None:
         cfg = self._config.get("overlay")
-        width = max(1, int(cfg["border_width"] * self._scale))
+        width = max(1, math.ceil(cfg["border_width"] * self._scale))
         pen = QPen(QColor(cfg["border_color"]))
         pen.setWidth(width)
         painter.setPen(pen)
@@ -106,36 +107,41 @@ class SelectionOverlay(QWidget):
         painter.drawRect(sel.adjusted(0, 0, -1, -1))
 
     def _paint_hint(self, painter: QPainter, sel: QRect) -> None:
-        if not self._config.get("overlay", "show_size_hint"):
+        cfg = self._config.get("overlay")
+        if not cfg["show_size_hint"]:
             return
 
         text = f"{sel.width()} x {sel.height()}"
         font = QFont()
-        font.setPointSize(int(_HINT_SIZE * self._scale))
+        font.setPointSize(max(1, math.ceil(cfg["hint_font_px"] * self._scale)))
         painter.setFont(font)
 
         metrics = painter.fontMetrics()
-        pad = int(4 * self._scale)
+        pad = max(1, math.ceil(cfg["hint_pad"] * self._scale))
+        offset = max(1, math.ceil(cfg["hint_offset"] * self._scale))
+        radius = max(1, math.ceil(cfg["hint_radius"] * self._scale))
         box = metrics.boundingRect(text).adjusted(-pad, -pad, pad, pad)
 
         # Prefer just above the selection; flip inside if it would go off-screen.
-        y = sel.top() - box.height() - 2
+        y = sel.top() - box.height() - offset
         if y < 0:
-            y = sel.top() + 2
+            y = sel.top() + offset
         box.moveTo(sel.left(), y)
 
+        bg = QColor(cfg["hint_bg"])
+        bg.setAlpha(max(0, min(255, int(cfg["hint_bg_alpha"]))))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 170))
-        painter.drawRoundedRect(box, 3, 3)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(box, radius, radius)
 
-        painter.setPen(QColor(255, 255, 255))
+        painter.setPen(QColor(cfg["hint_fg"]))
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     # -- input -------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
-            self.cancelled.emit()
+            self._cancel()
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -162,6 +168,19 @@ class SelectionOverlay(QWidget):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
-            self.cancelled.emit()
+            self._cancel()
             return
         super().keyPressEvent(event)
+
+    def _cancel(self) -> None:
+        """Retire the interaction, then announce it.
+
+        Dropping the anchor first matters: a cancel can arrive mid-drag (Esc,
+        or the right button while the left is held), and if the anchor
+        survived, the left release that follows would find it, recompute the
+        rect and emit `selected` as well -- one gesture, two signals, and a
+        screenshot the user cancelled.
+        """
+        self._anchor = None
+        self._current = None
+        self.cancelled.emit()

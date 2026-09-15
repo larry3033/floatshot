@@ -44,10 +44,18 @@ DEFAULTS: dict[str, Any] = {
     },
     "scale_mode": "free",
     "overlay": {
+        "dim_color": "#000000",
         "dim_alpha": 110,
         "border_color": "#4A9EFF",
         "border_width": 1,
         "show_size_hint": True,
+        "hint_font_px": 12,
+        "hint_bg": "#000000",
+        "hint_bg_alpha": 170,
+        "hint_fg": "#FFFFFF",
+        "hint_pad": 4,
+        "hint_offset": 2,
+        "hint_radius": 3,
     },
     "tray": {
         "show_startup_message": True,
