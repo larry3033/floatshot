@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QObject, QRect, Qt
+from PySide6.QtCore import QObject, QRect, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import DPI_AWARENESS_STATUS
@@ -28,7 +29,13 @@ class FloatShotApp(QObject):
         self._config = config
         self._windows: list[FloatWindow] = []
         self._overlay: SelectionOverlay | None = None
+        self._overlay_shortcut: QShortcut | None = None
         self._pending: tuple[object, QRect] | None = None
+
+        self._activation_attempts = 0
+        self._activation_timer = QTimer(self)
+        self._activation_timer.setInterval(int(config.get("activation", "retry_ms")))
+        self._activation_timer.timeout.connect(self._retry_activation)
 
         self._tray = Tray(config, self)
         self._tray.capture_requested.connect(self.start_capture)
@@ -90,15 +97,78 @@ class FloatShotApp(QObject):
         self._overlay = SelectionOverlay(virtual_geometry(), self._config)
         self._overlay.selected.connect(self._on_selected)
         self._overlay.cancelled.connect(self._on_cancelled)
+        # Esc cancels the selection.  The overlay's own keyPressEvent only
+        # receives the key while the overlay holds Qt's keyboard focus, so an
+        # application-wide shortcut adds the case where our application is
+        # active but the overlay is not the focused widget.  It does *not*
+        # cover a SetForegroundWindow that Windows refused -- no key event
+        # reaches us at all then -- so the defence against that is the
+        # activation retry below, not this shortcut.
+        #
+        # `activated` is routed into the overlay's single cancel entry point
+        # rather than straight to _on_cancelled, so Esc takes exactly the same
+        # path as the overlay's keyPressEvent and its right-click: the drag
+        # anchor is dropped and `cancelled` is announced exactly once.
+        self._overlay_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape),
+                                           self._overlay)
+        self._overlay_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._overlay_shortcut.activated.connect(self._overlay._cancel)
+        self._activation_attempts = 0
         self._overlay.show()
-        self._overlay.raise_()
-        self._overlay.activateWindow()
+        self._claim_foreground()
+        self._activation_timer.start()
+
+    def _claim_foreground(self) -> None:
+        """Ask for the keyboard, then keep asking until we actually have it.
+
+        `activateWindow()` is `SetForegroundWindow`, which Windows may refuse
+        *silently* when this process is not entitled to the foreground -- the
+        normal case, since the user pressed the hotkey while another
+        application was active.  The overlay cancels on Esc, and Esc needs the
+        keyboard, so a refused activation would strand a full-screen window
+        the user cannot dismiss.  Hence: set focus within the window as well
+        as activating it, and re-ask on a timer instead of asking once.
+        """
+        overlay = self._overlay
+        if overlay is None:
+            return
+        overlay.raise_()
+        overlay.activateWindow()
+        overlay.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._activation_attempts += 1
+
+    def _retry_activation(self) -> None:
+        """Re-assert the activation request whenever the overlay has lost it.
+
+        This keeps checking for as long as the selection is in progress --
+        focus can be lost again after a successful first attempt -- but the
+        number of times it will actually *ask* is capped, so a user who
+        deliberately puts another window in front during a selection is not
+        fought indefinitely.
+        """
+        overlay = self._overlay
+        if overlay is None:
+            self._activation_timer.stop()
+            return
+        if self._activation_attempts >= int(self._config.get(
+                "activation", "max_attempts")):
+            self._activation_timer.stop()
+            return
+        if overlay.isActiveWindow() and overlay.hasFocus():
+            return
+        self._claim_foreground()
 
     def _on_cancelled(self) -> None:
         self._pending = None
         self._dispose_overlay()
 
     def _dispose_overlay(self) -> None:
+        self._activation_timer.stop()
+        if self._overlay_shortcut is not None:
+            # An application-wide shortcut outlives the widget being hidden,
+            # so it has to be switched off explicitly, not just dropped.
+            self._overlay_shortcut.setEnabled(False)
+            self._overlay_shortcut = None
         if self._overlay is not None:
             self._overlay.hide()
             self._overlay.deleteLater()
@@ -152,7 +222,7 @@ class FloatShotApp(QObject):
             400 + 2 * pad,
             300 + 2 * pad,
             shadow_padding=shadow["padding"],
-            grip_px=resize["grip_px"],
+            grip_ratio=resize["grip_ratio"],
             close_diameter_px=close["diameter_px"],
             close_hit_radius_factor=close["hit_radius_factor"],
         )
@@ -169,7 +239,10 @@ class FloatShotApp(QObject):
             "",
             "以 400x300 图片为例——",
             f"  阴影内边距：{probe.padding} px",
-            f"  边缘判定带：{probe.grip} px",
+            f"  横向判定带：{probe.grip_x} px"
+            f"（窗口宽的 {float(resize['grip_ratio']) * 100:.0f}%）",
+            f"  纵向判定带：{probe.grip_y} px"
+            f"（窗口高的 {float(resize['grip_ratio']) * 100:.0f}%）",
             f"  关闭按钮径：{probe.close_diameter} px",
             f"  按钮判定半径：{probe.close_hit_radius:.1f} px",
             "",

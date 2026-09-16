@@ -117,7 +117,7 @@ class FloatWindow(QWidget):
             img_w + 2 * self._pad,
             img_h + 2 * self._pad,
             shadow_padding=self._shadow_cfg["padding"],
-            grip_px=r["grip_px"],
+            grip_ratio=r["grip_ratio"],
             close_diameter_px=cb["diameter_px"],
             close_hit_radius_factor=cb["hit_radius_factor"],
         )
@@ -162,6 +162,9 @@ class FloatWindow(QWidget):
         try:
             self._paint_shadow(painter)
             self._paint_image(painter)
+            self._paint_outline(painter)
+            self._paint_corner_dots(painter)
+            # Painted last so it covers the top-right corner dot while hovered.
             self._paint_close_button(painter)
         finally:
             painter.end()
@@ -198,6 +201,48 @@ class FloatWindow(QWidget):
         target = self.image_rect()
         painter.drawPixmap(target, self._pixmap)
 
+    def _paint_outline(self, painter: QPainter) -> None:
+        """Coloured frame just outside the picture.
+
+        Without it a freshly pasted screenshot blends into whatever is
+        behind it; the frame is what makes it read as "a window appeared
+        here" rather than as part of the desktop.
+        """
+        o = self._config.get("outline")
+        if not o["enabled"]:
+            return
+
+        width = max(1, math.ceil(int(o["width_px"]) * self._scale))
+        offset = math.ceil(int(o["offset_px"]) * self._scale)
+        # A stroked path straddles the path line, so push the rect out by
+        # half the stroke width: the frame then sits entirely outside the
+        # picture and never covers a pixel of the screenshot itself.
+        half = width / 2.0
+        rect = QRectF(self.image_rect()).adjusted(
+            -half - offset, -half - offset, half + offset, half + offset
+        )
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(o["color"]), width))
+        painter.drawRect(rect)
+
+    def _paint_corner_dots(self, painter: QPainter) -> None:
+        """A dot on each of the four corners, marking the resize handles."""
+        c = self._config.get("corner_dots")
+        if not c["enabled"]:
+            return
+
+        radius = max(1, math.ceil(int(c["diameter_px"]) * self._scale)) / 2.0
+        img = QRectF(self.image_rect())
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(c["color"]))
+        # QRectF's right()/bottom() are the far edges (x + width), which is
+        # where a corner dot belongs -- unlike QRect's, which is one less.
+        for cx in (img.left(), img.right()):
+            for cy in (img.top(), img.bottom()):
+                painter.drawEllipse(QPointF(cx, cy), radius, radius)
+
     def _paint_close_button(self, painter: QPainter) -> None:
         if self._close_opacity <= 0.01:
             return
@@ -232,7 +277,7 @@ class FloatWindow(QWidget):
 
     def _edge_at(self, pos: QPoint) -> Edge:
         return hit_test(pos.x(), pos.y(), self.width(), self.height(),
-                        self._metrics.grip)
+                        self._metrics.grip_x, self._metrics.grip_y)
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self._animate_close_button(float(self._config.get("close_button", "hover_opacity")))

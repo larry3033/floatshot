@@ -38,9 +38,31 @@ DEFAULTS: dict[str, Any] = {
         "cross_stroke_ratio": 0.22,
     },
     "resize": {
-        "grip_px": 6,
+        # Fraction of the window's width (for the left/right bands) and
+        # height (for the top/bottom bands). A ratio rather than a pixel
+        # count so the grab area grows with the picture: a fixed 6px band
+        # is hard to catch on a large window and eats a small one whole.
+        # Because the window size is already in physical pixels, a ratio
+        # needs no DPI scaling of its own.
+        "grip_ratio": 0.10,
         "min_width": 80,
         "min_height": 60,
+    },
+    # A coloured frame drawn just outside the picture, so a newly pasted
+    # screenshot is obviously "there" instead of blending into whatever is
+    # behind it.
+    "outline": {
+        "enabled": True,
+        "color": "#FF0000",
+        "width_px": 2,
+        "offset_px": 0,
+    },
+    # Dots on the picture's four corners: they mark where the resize handles
+    # are and read as "this is a window you can grab".
+    "corner_dots": {
+        "enabled": True,
+        "color": "#00FF00",
+        "diameter_px": 8,
     },
     "scale_mode": "free",
     "overlay": {
@@ -59,6 +81,28 @@ DEFAULTS: dict[str, Any] = {
     },
     "tray": {
         "show_startup_message": True,
+    },
+    # The tray glyph is drawn from these rather than from literals in
+    # tray.py, so it is the one place its size and colours live.
+    "icon": {
+        "size": 64,
+        "body_margin_left": 6,
+        "body_margin_top": 16,
+        "body_margin_right": 6,
+        "body_margin_bottom": 8,
+        "body_color": "#ECEFF1",
+        "body_outline_color": "#37474F",
+        "outline_px": 3,
+        "corner_radius": 6,
+        "lens_color": "#4A9EFF",
+        "lens_diameter_px": 18,
+    },
+    # How hard the overlay insists on the keyboard after it is shown.
+    # activateWindow() is SetForegroundWindow, which Windows may refuse
+    # without error, and without the foreground the overlay never sees Esc.
+    "activation": {
+        "retry_ms": 250,
+        "max_attempts": 8,
     },
 }
 

@@ -22,7 +22,8 @@ class Metrics:
     """DPI-adjusted element sizes for one window size."""
 
     padding: int
-    grip: int
+    grip_x: int
+    grip_y: int
     close_diameter: int
     close_hit_radius: float
 
@@ -32,28 +33,42 @@ def _scaled(base_px: int, scale: float) -> int:
     return max(1, math.ceil(base_px * scale))
 
 
+def _grip(side: int, ratio: float) -> int:
+    """Resize-band thickness along one axis, in pixels.
+
+    `ratio` is a fraction of that axis, so the band tracks the picture size
+    instead of staying a fixed handful of pixels. A fixed band is the worst
+    of both worlds: fiddly to hit on a large window and proportionally huge
+    on a small one.
+
+    The clamp keeps opposite bands from meeting in the middle, which would
+    leave no area for plain dragging.
+    """
+    if side <= 0:
+        return 1
+    band = max(1, math.ceil(side * ratio))
+    return max(1, min(band, side // 3))
+
+
 def compute_metrics(
     scale: float,
     width: int,
     height: int,
     *,
     shadow_padding: int,
-    grip_px: int,
+    grip_ratio: float,
     close_diameter_px: int,
     close_hit_radius_factor: float = 1.5,
 ) -> Metrics:
     """Return element sizes for a window of `width` x `height` physical pixels.
 
-    `scale` is the system UI scale (1.0 == 96 DPI).
-    `close_hit_radius_factor` is how much larger the clickable radius is
-    than the drawn radius; a hit area smaller than the visual button would
-    make edge pixels unclickable.
+    `scale` is the system UI scale (1.0 == 96 DPI). `grip_ratio` is not
+    scaled by it -- a ratio of an already-physical size needs no separate
+    DPI correction. `close_hit_radius_factor` is how much larger the
+    clickable radius is than the drawn radius; a hit area smaller than the
+    visual button would make edge pixels unclickable.
     """
     short_side = max(0, min(width, height))
-
-    grip = _scaled(grip_px, scale)
-    # Layer 2: keep the four corner grips from overlapping each other.
-    grip = max(1, min(grip, short_side // 3)) if short_side else grip
 
     close_diameter = _scaled(close_diameter_px, scale)
     # Layer 2: keep the button from swallowing a very small window.
@@ -62,7 +77,8 @@ def compute_metrics(
 
     return Metrics(
         padding=_scaled(shadow_padding, scale),
-        grip=grip,
+        grip_x=_grip(width, grip_ratio),
+        grip_y=_grip(height, grip_ratio),
         close_diameter=close_diameter,
         close_hit_radius=(close_diameter / 2.0) * max(1.0, close_hit_radius_factor),
     )

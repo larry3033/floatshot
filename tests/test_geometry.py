@@ -16,63 +16,79 @@ W, H, G = 400, 300, 6
 
 
 def test_center_is_not_an_edge():
-    assert hit_test(200, 150, W, H, G) == Edge.NONE
+    assert hit_test(200, 150, W, H, G, G) == Edge.NONE
 
 
 def test_left_edge():
-    assert hit_test(2, 150, W, H, G) == Edge.LEFT
+    assert hit_test(2, 150, W, H, G, G) == Edge.LEFT
 
 
 def test_right_edge():
-    assert hit_test(W - 2, 150, W, H, G) == Edge.RIGHT
+    assert hit_test(W - 2, 150, W, H, G, G) == Edge.RIGHT
 
 
 def test_top_edge():
-    assert hit_test(200, 2, W, H, G) == Edge.TOP
+    assert hit_test(200, 2, W, H, G, G) == Edge.TOP
 
 
 def test_bottom_edge():
-    assert hit_test(200, H - 2, W, H, G) == Edge.BOTTOM
+    assert hit_test(200, H - 2, W, H, G, G) == Edge.BOTTOM
 
 
 def test_corners_are_combinations():
-    assert hit_test(2, 2, W, H, G) == Edge.LEFT | Edge.TOP
-    assert hit_test(W - 2, 2, W, H, G) == Edge.RIGHT | Edge.TOP
-    assert hit_test(2, H - 2, W, H, G) == Edge.LEFT | Edge.BOTTOM
-    assert hit_test(W - 2, H - 2, W, H, G) == Edge.RIGHT | Edge.BOTTOM
+    assert hit_test(2, 2, W, H, G, G) == Edge.LEFT | Edge.TOP
+    assert hit_test(W - 2, 2, W, H, G, G) == Edge.RIGHT | Edge.TOP
+    assert hit_test(2, H - 2, W, H, G, G) == Edge.LEFT | Edge.BOTTOM
+    assert hit_test(W - 2, H - 2, W, H, G, G) == Edge.RIGHT | Edge.BOTTOM
 
 
 def test_grip_boundary_is_inclusive_at_zero():
-    assert hit_test(0, 150, W, H, G) == Edge.LEFT
+    assert hit_test(0, 150, W, H, G, G) == Edge.LEFT
 
 
 def test_grip_boundary_is_exclusive_at_grip():
     # 恰好等于 grip 时已经在内容区内，不应命中
-    assert hit_test(G, 150, W, H, G) == Edge.NONE
+    assert hit_test(G, 150, W, H, G, G) == Edge.NONE
 
 
 def test_just_inside_grip_hits():
-    assert hit_test(G - 1, 150, W, H, G) == Edge.LEFT
+    assert hit_test(G - 1, 150, W, H, G, G) == Edge.LEFT
 
 
 def test_oversized_grip_is_clamped_internally():
     # 防御性：调用方传了未经 clamp 的 grip，也不能让左右判定区重叠
     # 90x90 的窗口，grip=100 被内部压到 30；点 (50,50) 落在中间安全区
-    assert hit_test(50, 50, 90, 90, grip=100) == Edge.NONE
+    assert hit_test(50, 50, 90, 90, grip_x=100, grip_y=100) == Edge.NONE
 
 
 def test_clamped_grip_still_matches_its_boundary():
     # 承上：clamp 到 30 之后，29 仍应命中左边缘，30 应落回内容区
-    assert hit_test(29, 50, 90, 90, grip=100) == Edge.LEFT
-    assert hit_test(30, 50, 90, 90, grip=100) == Edge.NONE
+    assert hit_test(29, 50, 90, 90, grip_x=100, grip_y=100) == Edge.LEFT
+    assert hit_test(30, 50, 90, 90, grip_x=100, grip_y=100) == Edge.NONE
+
+
+def test_grip_axes_are_independent():
+    # 判定带是按各自轴的尺寸比例算的，所以两条轴的宽度可以完全不同：
+    # 这里 grip_x=130 远宽于 grip_y=1。
+    assert hit_test(10, 150, W, H, 130, 1) == Edge.LEFT
+    assert hit_test(200, 150, W, H, 130, 1) == Edge.NONE
+    assert hit_test(200, 0, W, H, 130, 1) == Edge.TOP
+    assert hit_test(200, 1, W, H, 130, 1) == Edge.NONE
+
+
+def test_wide_grip_x_does_not_shrink_grip_y():
+    # clamp 必须逐轴独立：一个超大的 grip_x 不该把纵向判定带也压掉
+    edge = hit_test(1, 1, 300, 300, grip_x=10_000, grip_y=100)
+    assert Edge.LEFT in edge
+    assert Edge.TOP in edge
 
 
 def test_negative_coordinates_are_outside():
-    assert hit_test(-5, 150, W, H, G) == Edge.NONE
+    assert hit_test(-5, 150, W, H, G, G) == Edge.NONE
 
 
 def test_point_beyond_window_is_outside():
-    assert hit_test(W + 5, 150, W, H, G) == Edge.NONE
+    assert hit_test(W + 5, 150, W, H, G, G) == Edge.NONE
 
 
 # ---------- 比例约束 ----------

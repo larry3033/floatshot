@@ -7,26 +7,39 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 
 from .config import Config
 
-_ICON_SIZE = 64
 
+def build_tray_icon(config: Config) -> QIcon:
+    """Draw a simple camera-ish glyph so no image asset is needed.
 
-def build_tray_icon() -> QIcon:
-    """Draw a simple camera-ish glyph so no image asset is needed."""
-    pm = QPixmap(_ICON_SIZE, _ICON_SIZE)
+    Every size and colour comes from the `icon` section of the config, so
+    this module holds no literal of its own.
+    """
+    icon = config.get("icon")
+    size = max(1, int(icon["size"]))
+
+    pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pm)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        body = pm.rect().adjusted(6, 16, -6, -8)
-        painter.setPen(QPen(QColor("#37474F"), 3))
-        painter.setBrush(QColor("#ECEFF1"))
-        painter.drawRoundedRect(body, 6, 6)
+        body = pm.rect().adjusted(
+            int(icon["body_margin_left"]),
+            int(icon["body_margin_top"]),
+            -int(icon["body_margin_right"]),
+            -int(icon["body_margin_bottom"]),
+        )
+        radius = float(icon["corner_radius"])
+        painter.setPen(QPen(QColor(icon["body_outline_color"]),
+                            int(icon["outline_px"])))
+        painter.setBrush(QColor(icon["body_color"]))
+        painter.drawRoundedRect(body, radius, radius)
 
-        painter.setBrush(QColor("#4A9EFF"))
+        lens = int(icon["lens_diameter_px"])
+        painter.setBrush(QColor(icon["lens_color"]))
         painter.setPen(Qt.PenStyle.NoPen)
         cx, cy = body.center().x(), body.center().y()
-        painter.drawEllipse(cx - 9, cy - 9, 18, 18)
+        painter.drawEllipse(cx - lens // 2, cy - lens // 2, lens, lens)
     finally:
         painter.end()
 
@@ -45,7 +58,7 @@ class Tray(QObject):
         from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
         self._config = config
-        self._icon = QSystemTrayIcon(build_tray_icon(), self)
+        self._icon = QSystemTrayIcon(build_tray_icon(config), self)
         self._icon.setToolTip("FloatShot")
 
         menu = QMenu()

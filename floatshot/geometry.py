@@ -19,29 +19,37 @@ class Edge(IntFlag):
     BOTTOM = 8
 
 
-def hit_test(x: float, y: float, width: int, height: int, grip: int) -> Edge:
+def hit_test(
+    x: float, y: float, width: int, height: int, grip_x: int, grip_y: int
+) -> Edge:
     """Return the edges touched by the client-area point (x, y).
 
-    `grip` is the thickness of the resize band along each edge. It is
-    clamped internally so that an oversized value can never make opposite
-    bands overlap and swallow the whole window.
+    `grip_x` is the thickness of the left/right resize bands and `grip_y`
+    that of the top/bottom bands -- two values rather than one because the
+    bands are a fraction of each axis, so a wide window gets wide side
+    bands and a tall window gets tall ones.
+
+    Both are clamped internally so an oversized value can never make
+    opposite bands meet and swallow the whole window. The clamp is per
+    axis: a huge `grip_x` must not shrink the vertical bands.
     """
     if width <= 0 or height <= 0:
         return Edge.NONE
 
-    grip = max(1, min(grip, min(width, height) // 3))
+    grip_x = max(1, min(grip_x, max(1, width // 3)))
+    grip_y = max(1, min(grip_y, max(1, height // 3)))
 
     if not (0 <= x < width and 0 <= y < height):
         return Edge.NONE
 
     edge = Edge.NONE
-    if x < grip:
+    if x < grip_x:
         edge |= Edge.LEFT
-    elif x >= width - grip:
+    elif x >= width - grip_x:
         edge |= Edge.RIGHT
-    if y < grip:
+    if y < grip_y:
         edge |= Edge.TOP
-    elif y >= height - grip:
+    elif y >= height - grip_y:
         edge |= Edge.BOTTOM
     return edge
 
