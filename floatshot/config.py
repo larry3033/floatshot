@@ -50,18 +50,21 @@ DEFAULTS: dict[str, Any] = {
     },
     # A coloured frame drawn just outside the picture, so a newly pasted
     # screenshot is obviously "there" instead of blending into whatever is
-    # behind it.
+    # behind it. Mid-grey rather than black or white on purpose: a frame has
+    # to stay visible against both a light and a dark desktop, and either
+    # extreme disappears against one of them.
     "outline": {
         "enabled": True,
-        "color": "#FF0000",
+        "color": "#7A7A7A",
         "width_px": 2,
         "offset_px": 0,
     },
     # Dots on the picture's four corners: they mark where the resize handles
-    # are and read as "this is a window you can grab".
+    # are and read as "this is a window you can grab". Lighter than the
+    # frame so the two read as two levels rather than one thick border.
     "corner_dots": {
         "enabled": True,
-        "color": "#00FF00",
+        "color": "#C8C8C8",
         "diameter_px": 8,
     },
     "scale_mode": "free",
