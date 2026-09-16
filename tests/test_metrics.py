@@ -3,10 +3,10 @@ import pytest
 from floatshot.metrics import Metrics, compute_metrics
 
 
-def _m(scale=1.0, w=436, h=336, pad=18, ratio=0.10, close=16, hit=1.5):
-    """Metrics for a 436x336 window: a 400x300 picture plus 18px of padding."""
+def _m(scale=1.0, w=400, h=300, pad=18, ratio=0.10, close=16, hit=1.5):
+    """Metrics for a `w` x `h` PICTURE (not window) with `pad` shadow padding."""
     return compute_metrics(
-        scale=scale, width=w, height=h,
+        scale=scale, image_width=w, image_height=h,
         shadow_padding=pad, grip_ratio=ratio,
         close_diameter_px=close, close_hit_radius_factor=hit,
     )
@@ -26,78 +26,105 @@ def test_close_diameter_scales_with_dpi():
     assert _m(scale=1.5).close_diameter == 24
 
 
-# ---------- The resize bands: a fraction of each axis ----------
+# ---------- The resize bands ----------
+#
+# A band is measured in from the WINDOW's edge and covers the shadow padding
+# plus `ratio` of the picture. Measured from the picture's edge instead, it
+# would leave the picture's own edge -- the pixels the user actually grabs --
+# outside the band on any small window.
 
-def test_grip_is_a_fraction_of_each_axis():
-    # 436 * 0.10 = 43.6 -> 44;  336 * 0.10 = 33.6 -> 34
+def test_band_is_padding_plus_a_fraction_of_the_picture():
     m = _m(ratio=0.10)
-    assert m.grip_x == 44
-    assert m.grip_y == 34
+    assert m.grip_x == 18 + 40      # padding + 400 * 0.10
+    assert m.grip_y == 18 + 30      # padding + 300 * 0.10
 
 
-def test_grip_axes_use_their_own_dimension():
-    # A wide, short window gets wide side bands and narrow top/bottom ones.
+def test_band_axes_use_their_own_dimension():
+    # A wide, short picture gets wide side bands and narrow top/bottom ones.
     m = _m(w=1000, h=200, ratio=0.10)
-    assert m.grip_x == 100
-    assert m.grip_y == 20
+    assert m.grip_x == 18 + 100
+    assert m.grip_y == 18 + 20
     assert m.grip_x > m.grip_y
 
 
-def test_grip_does_not_scale_with_dpi():
-    # The ratio multiplies a window size that is ALREADY in physical pixels,
-    # so applying the DPI scale again would double the bands on a 150%
-    # display. This is the property that makes a ratio better than a pixel
-    # count here.
+def test_picture_portion_does_not_scale_with_dpi():
+    # The padding does scale, so the band as a whole does too -- but the part
+    # derived from the ratio must not, or the band would double on a 150%
+    # display. This is the property a fixed pixel count cannot have.
     base = _m(scale=1.0)
     hidpi = _m(scale=1.5)
-    assert hidpi.grip_x == base.grip_x
-    assert hidpi.grip_y == base.grip_y
+    assert (base.grip_x - base.padding) == (hidpi.grip_x - hidpi.padding)
+    assert (base.grip_y - base.padding) == (hidpi.grip_y - hidpi.padding)
 
 
-def test_grip_rounds_up():
+def test_band_rounds_up():
     # 337 * 0.10 = 33.7 -> 34, not 33: a band is better slightly too wide.
-    assert _m(w=337, h=337, ratio=0.10).grip_x == 34
+    assert _m(w=337, h=337, ratio=0.10).grip_x == 18 + 34
 
 
-def test_grip_grows_with_the_window():
-    # The point of this change: a bigger picture is easier to grab.
+def test_band_grows_with_the_picture():
+    # A bigger picture is easier to grab.
     small = _m(w=200, h=200, ratio=0.10)
     large = _m(w=1200, h=800, ratio=0.10)
     assert large.grip_x > small.grip_x
     assert large.grip_y > small.grip_y
 
 
+# ---------- Regression: the picture's edge must stay grabbable ----------
+#
+# Before this was anchored to the window's edge, any picture narrower than
+# about 144px had its own edge fall outside the band: dragging the edge the
+# user can see was treated as a plain window move, so the window could not
+# be resized up again.
+
+@pytest.mark.parametrize("w,h", [(400, 300), (200, 150), (144, 108), (100, 80), (44, 24)])
+def test_picture_edge_is_inside_the_band(w, h):
+    m = _m(w=w, h=h, ratio=0.10)
+    assert m.padding < m.grip_x, (
+        f"picture left edge at x={m.padding} falls outside the band [0,{m.grip_x})"
+    )
+    assert m.padding < m.grip_y, (
+        f"picture top edge at y={m.padding} falls outside the band [0,{m.grip_y})"
+    )
+
+
+def test_picture_edge_grabbable_at_the_minimum_window():
+    # The smallest window the app allows is 80x60, i.e. a 44x24 picture at
+    # the default 18px padding -- the worst case for this bug.
+    m = _m(w=44, h=24, pad=18, ratio=0.10)
+    assert m.padding < m.grip_x
+    assert m.padding < m.grip_y
+
+
 # ---------- Layer 2: percentage clamps ----------
 
-def test_grip_clamped_on_small_window():
-    # 60 // 3 = 20; a 0.5 ratio would give 30 and is pulled back to 20.
+def test_band_clamped_on_small_window():
+    # A 60x60 picture gives a 96x96 window; 96 // 3 = 32 pulls the band back.
     m = _m(w=60, h=60, ratio=0.5)
-    assert m.grip_x == 20
-    assert m.grip_y == 20
+    assert m.grip_x == 32
+    assert m.grip_y == 32
 
 
-def test_grip_clamp_is_per_axis():
-    # 90 // 3 = 30 and 400 // 3 = 133: each axis is clamped on its own, so a
-    # wide-window clamp cannot shrink the other axis's bands.
+def test_band_clamp_is_per_axis():
     m = _m(w=90, h=400, ratio=0.5)
-    assert m.grip_x == 30
-    assert m.grip_y == 133
+    assert m.grip_x == 42       # 126 // 3
+    assert m.grip_y == 145      # 436 // 3
 
 
-def test_grip_leaves_room_to_drag():
+def test_band_leaves_room_to_drag():
     # Both bands together must never eat the window, or there would be
     # nowhere left to press to move it.
     for side in (60, 200, 1000):
         m = _m(w=side, h=side, ratio=1.0)
-        assert m.grip_x * 2 < side
+        assert m.grip_x * 2 < side + 2 * m.padding
 
 
-def test_close_button_clamped_on_tiny_window():
+def test_close_button_clamped_on_a_small_window():
     m = _m(w=60, h=60, ratio=0.1, close=100)
-    assert m.close_diameter == 18          # int(60 * 0.3)
+    assert m.close_diameter == 28     # int(96 * 0.3)
 
 
-def test_close_button_not_clamped_on_normal_window():
+def test_close_button_not_clamped_on_a_normal_window():
     assert _m(scale=1.0).close_diameter == 16
 
 
@@ -116,7 +143,7 @@ def test_hit_radius_scales_with_visual_size():
 
 # ---------- Degenerate input ----------
 
-def test_degenerate_window_still_returns_positive_sizes():
+def test_degenerate_picture_still_returns_positive_sizes():
     m = _m(w=0, h=0)
     assert m.grip_x >= 1
     assert m.grip_y >= 1

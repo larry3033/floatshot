@@ -109,13 +109,17 @@ class FloatWindow(QWidget):
     # -- geometry helpers ------------------------------------------------
 
     def _metrics_for(self, img_w: int, img_h: int) -> Metrics:
-        """Element sizes for a window whose picture area is img_w x img_h."""
+        """Element sizes for a window whose picture area is img_w x img_h.
+
+        Takes the PICTURE size: compute_metrics derives the window size from
+        it, because the resize bands are anchored to the picture's edges.
+        """
         cb = self._config.get("close_button")
         r = self._config.get("resize")
         return compute_metrics(
             self._scale,
-            img_w + 2 * self._pad,
-            img_h + 2 * self._pad,
+            img_w,
+            img_h,
             shadow_padding=self._shadow_cfg["padding"],
             grip_ratio=r["grip_ratio"],
             close_diameter_px=cb["diameter_px"],

@@ -24,10 +24,12 @@ def hit_test(
 ) -> Edge:
     """Return the edges touched by the client-area point (x, y).
 
-    `grip_x` is the thickness of the left/right resize bands and `grip_y`
-    that of the top/bottom bands -- two values rather than one because the
-    bands are a fraction of each axis, so a wide window gets wide side
-    bands and a tall window gets tall ones.
+    `grip_x` and `grip_y` are the full thickness of the resize bands,
+    measured in from the WINDOW's edges -- they already include the shadow
+    padding. That matters: the user grabs the picture's edge, which sits
+    `padding` pixels in from the window's, so a band measured from the
+    picture's edge inwards would leave the very pixels being grabbed
+    outside the band.
 
     Both are clamped internally so an oversized value can never make
     opposite bands meet and swallow the whole window. The clamp is per

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 from PySide6.QtCore import QObject, QRect, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -214,13 +212,12 @@ class FloatShotApp(QObject):
         shadow = self._config.get("shadow")
         resize = self._config.get("resize")
         close = self._config.get("close_button")
-        pad = math.ceil(shadow["padding"] * scale)
 
         # Report metrics for a representative 400x300 picture.
         probe = compute_metrics(
             scale,
-            400 + 2 * pad,
-            300 + 2 * pad,
+            400,
+            300,
             shadow_padding=shadow["padding"],
             grip_ratio=resize["grip_ratio"],
             close_diameter_px=close["diameter_px"],
