@@ -47,47 +47,43 @@ def build_tray_icon(config: Config) -> QIcon:
 
 
 class Tray(QObject):
-    """Owns the tray icon and translates menu picks into signals."""
+    """Owns the tray icon and translates menu picks into signals.
 
-    capture_requested = Signal()
-    diagnostics_requested = Signal()
+    Deliberately minimal: the configuration window is the main interface, so
+    the tray only offers a way back to it and a way out.
+    """
+
+    open_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, config: Config, parent: QObject | None = None) -> None:
         super().__init__(parent)
         from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-        self._config = config
         self._icon = QSystemTrayIcon(build_tray_icon(config), self)
         self._icon.setToolTip("FloatShot")
 
         menu = QMenu()
-        # Show the configured hotkey in the menu: the user may have changed
-        # it in config.json, and this is the only place it is visible.
-        act_capture = QAction(f"截屏（{config.get('hotkey')}）", menu)
-        act_diag = QAction("诊断信息", menu)
+        act_open = QAction("打开主界面", menu)
         act_quit = QAction("退出", menu)
 
-        act_capture.triggered.connect(self.capture_requested.emit)
-        act_diag.triggered.connect(self.diagnostics_requested.emit)
+        act_open.triggered.connect(self.open_requested.emit)
         act_quit.triggered.connect(self.quit_requested.emit)
 
-        menu.addAction(act_capture)
-        menu.addSeparator()
-        menu.addAction(act_diag)
+        menu.addAction(act_open)
         menu.addSeparator()
         menu.addAction(act_quit)
         self._menu = menu
         self._icon.setContextMenu(menu)
 
-        # Left-click should also start a capture, matching common tools.
+        # Left-click should also reopen the configuration interface.
         self._icon.activated.connect(self._on_activated)
 
     def _on_activated(self, reason) -> None:
         from PySide6.QtWidgets import QSystemTrayIcon
 
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.capture_requested.emit()
+            self.open_requested.emit()
 
     def show(self) -> None:
         self._icon.show()

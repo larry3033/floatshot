@@ -30,6 +30,12 @@ WM_HOTKEY = 0x0312
 # Arbitrary but stable id, used to tell our hotkey apart from others.
 _HOTKEY_ID = 0xA17E
 
+# Loaded with use_last_error so ctypes.get_last_error() reports the real
+# Win32 error from RegisterHotKey. Plain ctypes.windll does not capture it,
+# so get_last_error() would always read back 0 and the failure notice would
+# tell the user nothing.
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
@@ -82,12 +88,12 @@ class GlobalHotkey(QObject):
         modifiers, vk = hotkey.win32_args()
         # NOREPEAT stops auto-repeat from firing captures while held down.
         ok = bool(
-            ctypes.windll.user32.RegisterHotKey(
+            _user32.RegisterHotKey(
                 None, _HOTKEY_ID, modifiers | MOD_NOREPEAT, vk
             )
         )
         if not ok:
-            err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
+            err = ctypes.get_last_error()
             self.last_error = (
                 f"RegisterHotKey failed for {hotkey.text} "
                 f"(Win32 error {err}). Another program may already own it."
@@ -102,7 +108,7 @@ class GlobalHotkey(QObject):
     def unregister(self) -> None:
         """Release the hotkey if one is held."""
         if self._registered:
-            ctypes.windll.user32.UnregisterHotKey(None, _HOTKEY_ID)
+            _user32.UnregisterHotKey(None, _HOTKEY_ID)
             self._registered = False
 
 

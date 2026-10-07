@@ -15,6 +15,7 @@ import math
 
 from PySide6.QtCore import (
     Property,
+    QDateTime,
     QEasingCurve,
     QPoint,
     QPointF,
@@ -24,9 +25,34 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QInputDialog,
+    QMenu,
+    QMessageBox,
+    QWidget,
+)
 
+from .annotation_paint import AnnotationRenderer, text_box_size
+from .ai_bar import AiBar
+from .annotations import (
+    Annotation,
+    Document,
+    Tool,
+    angle_deg,
+    corner_points,
+    map_to_image,
+    point_in_rotated_rect,
+    rotate_point,
+)
 from .config import Config
 from .dpi import ui_scale
 from .geometry import (
@@ -38,6 +64,7 @@ from .geometry import (
     hit_test,
 )
 from .metrics import Metrics, compute_metrics
+from .toolbar import EditorToolbar
 
 # Cursor shape per edge combination.
 _CURSORS: dict[Edge, Qt.CursorShape] = {
@@ -104,6 +131,32 @@ class FloatWindow(QWidget):
         self._close_anim = QPropertyAnimation(self, b"closeOpacity", self)
         self._close_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+        # Annotation state. The renderer keeps the untouched picture so the
+        # mosaic tool can always sample the original pixels, and so undo can
+        # simply stop painting an item instead of un-painting one.
+        self._ann_cfg = config.get("annotation")
+        self._doc = Document()
+        self._renderer = AnnotationRenderer(pixmap, self._ann_cfg)
+        self._tool: Tool | None = None
+        self._pending: Annotation | None = None
+        self._toolbar: EditorToolbar | None = None
+        self._ai_bar: AiBar | None = None
+        # None means "use the per-tool default from config"; a string is a
+        # colour the user picked, applied to new marks and to the selection.
+        self._color: str | None = None
+        self._width: float | None = None
+        self._dragged = False
+
+        # Text selection / transform state.
+        self._selected: Annotation | None = None
+        self._text_mode: str | None = None
+        self._text_center: tuple[float, float] = (0.0, 0.0)
+        self._text_font = 0
+        self._text_rotation = 0.0
+        self._text_press_at: tuple[float, float] = (0.0, 0.0)
+        self._text_distance = 1.0
+        self._text_angle = 0.0
+
         self.setWindowTitle("FloatShot")
 
     # -- geometry helpers ------------------------------------------------
@@ -166,8 +219,10 @@ class FloatWindow(QWidget):
         try:
             self._paint_shadow(painter)
             self._paint_image(painter)
+            self._paint_annotations(painter)
             self._paint_outline(painter)
             self._paint_corner_dots(painter)
+            self._paint_selection(painter)
             # Painted last so it covers the top-right corner dot while hovered.
             self._paint_close_button(painter)
         finally:
@@ -204,6 +259,63 @@ class FloatWindow(QWidget):
     def _paint_image(self, painter: QPainter) -> None:
         target = self.image_rect()
         painter.drawPixmap(target, self._pixmap)
+
+    def _paint_annotations(self, painter: QPainter) -> None:
+        """Draw the items scaled into the picture's on-screen rect.
+
+        Items live in image coordinates, so the painter is scaled to the
+        picture's current display size rather than the items being.
+        """
+        items = self._doc.items
+        if not items and self._pending is None:
+            return
+        target = self.image_rect()
+        painter.save()
+        painter.translate(target.x(), target.y())
+        painter.scale(
+            target.width() / max(1, self._pixmap.width()),
+            target.height() / max(1, self._pixmap.height()),
+        )
+        self._renderer.paint(painter, items, self._pending)
+        painter.restore()
+
+    def _paint_selection(self, painter: QPainter) -> None:
+        """Dashed frame, corner handles and rotation handle for the selection."""
+        selected = self._selected
+        if selected is None or not self._drawing_tool_active():
+            return
+
+        target = self.image_rect()
+        scale_x = target.width() / max(1, self._pixmap.width())
+        scale_y = target.height() / max(1, self._pixmap.height())
+
+        def to_widget(point: tuple[float, float]) -> QPointF:
+            return QPointF(target.x() + point[0] * scale_x,
+                           target.y() + point[1] * scale_y)
+
+        centre = selected.points[0]
+        width, height = text_box_size(selected)
+        corners = [
+            rotate_point(x, y, centre[0], centre[1], selected.rotation)
+            for x, y in corner_points(centre[0], centre[1], width, height)
+        ]
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#4A9EFF"), 1, Qt.PenStyle.DashLine))
+        painter.drawPolygon(QPolygonF([to_widget(c) for c in corners]))
+
+        top_mid = rotate_point(centre[0], centre[1] - height / 2.0,
+                               centre[0], centre[1], selected.rotation)
+        rotation_handle = self._rotation_handle_point(selected)
+
+        painter.setPen(QPen(QColor("#4A9EFF"), 1))
+        painter.drawLine(to_widget(top_mid), to_widget(rotation_handle))
+
+        painter.setBrush(QColor("#FFFFFF"))
+        for point in corners:
+            painter.drawEllipse(to_widget(point), 4.0, 4.0)
+        painter.setBrush(QColor("#4A9EFF"))
+        painter.drawEllipse(to_widget(rotation_handle), 4.0, 4.0)
 
     def _paint_outline(self, painter: QPainter) -> None:
         """Coloured frame just outside the picture.
@@ -292,6 +404,9 @@ class FloatWindow(QWidget):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            self._show_context_menu(event.globalPosition().toPoint())
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position().toPoint()
@@ -300,9 +415,195 @@ class FloatWindow(QWidget):
             self.close()   # closeEvent is the single place that emits `closed`
             return
 
+        if self._drawing_tool_active() and self._image_point(event.position())[2]:
+            if self._tool is Tool.TEXT:
+                self._text_press(event.position())
+            else:
+                self._begin_annotation(event.position())
+            return
+
+        self._dragged = False
         self._press_pos = event.globalPosition().toPoint()
         self._active_edge = self._edge_at(pos)
         self._press_geom = (self.x(), self.y(), self.width(), self.height())
+
+    def _drawing_tool_active(self) -> bool:
+        return self._tool is not None and self._toolbar is not None \
+            and self._toolbar.isVisible()
+
+    def _image_point(self, pos: QPointF) -> tuple[float, float, bool]:
+        """Map a widget-space point onto the picture's own pixel grid."""
+        r = self.image_rect()
+        return map_to_image(
+            pos.x(), pos.y(),
+            (r.x(), r.y(), r.width(), r.height()),
+            self._pixmap.width(), self._pixmap.height(),
+        )
+
+    def _begin_annotation(self, pos: QPointF) -> None:
+        """Start the stroke under the pointer for the drag-style tools."""
+        ix, iy, _ = self._image_point(pos)
+        tool = self._tool
+        assert tool is not None
+
+        if tool is Tool.NUMBER:
+            self._doc.add(Annotation(
+                tool=Tool.NUMBER,
+                points=[(ix, iy)],
+                color=self._color or self._ann_cfg["number_color"],
+                number=self._doc.next_number(),
+                font_px=int(self._ann_cfg["number_font_px"]),
+            ))
+            self._after_change()
+            return
+
+        color, width = self._tool_style(tool)
+        self._pending = Annotation(
+            tool=tool, points=[(ix, iy)], color=color, width=width
+        )
+        self.update()
+
+    # -- text: place / select / move / scale / rotate ---------------------
+
+    def _text_press(self, pos: QPointF) -> None:
+        ix, iy, _ = self._image_point(pos)
+
+        if self._selected is not None:
+            handle = self._handle_at(ix, iy)
+            if handle is not None:
+                self._start_text_drag("rotate" if handle == "rotate" else "scale",
+                                      ix, iy)
+                return
+            if self._inside_selection(ix, iy):
+                self._start_text_drag("move", ix, iy)
+                return
+
+        hit = self._text_at(ix, iy)
+        if hit is not None:
+            self._selected = hit
+            self._start_text_drag("move", ix, iy)
+            self.update()
+            return
+
+        self._new_text(ix, iy)
+
+    def _new_text(self, ix: float, iy: float) -> None:
+        self._selected = None
+        text, ok = QInputDialog.getText(self, "文字", "输入文字：")
+        if not ok or not text:
+            self.update()
+            return
+        annotation = Annotation(
+            tool=Tool.TEXT,
+            points=[(ix, iy)],
+            color=self._color or self._ann_cfg["text_color"],
+            text=text,
+            font_px=int(self._ann_cfg["text_font_px"]),
+        )
+        self._doc.add(annotation)
+        # Select it straight away so it can be dragged/scaled/rotated without
+        # a second click.
+        self._selected = annotation
+        self._after_change()
+
+    def _start_text_drag(self, mode: str, ix: float, iy: float) -> None:
+        selected = self._selected
+        assert selected is not None
+        self._text_mode = mode
+        self._text_center = selected.points[0]
+        self._text_font = int(selected.font_px)
+        self._text_rotation = selected.rotation
+        self._text_press_at = (ix, iy)
+        self._text_distance = max(
+            1.0,
+            math.hypot(ix - self._text_center[0], iy - self._text_center[1]),
+        )
+        self._text_angle = angle_deg(
+            self._text_center[0], self._text_center[1], ix, iy
+        )
+
+    def _text_box(self, annotation: Annotation) -> tuple[float, float, float, float]:
+        """(centre_x, centre_y, width, height) in image coordinates."""
+        width, height = text_box_size(annotation)
+        return (annotation.points[0][0], annotation.points[0][1], width, height)
+
+    def _handle_image_radius(self) -> float:
+        target = self.image_rect()
+        return 7.0 * max(1, self._pixmap.width()) / max(1, target.width())
+
+    def _rotation_handle_point(self, annotation: Annotation) -> tuple[float, float]:
+        cx, cy, _, height = self._text_box(annotation)
+        gap = 26.0 * max(1, self._pixmap.width()) / max(1, self.image_rect().width())
+        return rotate_point(cx, cy - height / 2.0 - gap, cx, cy, annotation.rotation)
+
+    def _handle_at(self, ix: float, iy: float) -> str | None:
+        selected = self._selected
+        if selected is None:
+            return None
+        cx, cy, width, height = self._text_box(selected)
+        radius = self._handle_image_radius()
+
+        hx, hy = self._rotation_handle_point(selected)
+        if math.hypot(ix - hx, iy - hy) <= radius * 1.4:
+            return "rotate"
+
+        for index, (x, y) in enumerate(corner_points(cx, cy, width, height)):
+            rx, ry = rotate_point(x, y, cx, cy, selected.rotation)
+            if math.hypot(ix - rx, iy - ry) <= radius:
+                return f"corner{index}"
+        return None
+
+    def _inside_selection(self, ix: float, iy: float) -> bool:
+        selected = self._selected
+        if selected is None:
+            return False
+        cx, cy, width, height = self._text_box(selected)
+        return point_in_rotated_rect(
+            ix, iy, cx, cy, width, height, selected.rotation
+        )
+
+    def _text_at(self, ix: float, iy: float) -> Annotation | None:
+        for item in reversed(self._doc.items):
+            if item.tool is not Tool.TEXT:
+                continue
+            cx, cy, width, height = self._text_box(item)
+            if point_in_rotated_rect(ix, iy, cx, cy, width, height, item.rotation):
+                return item
+        return None
+
+    def _drag_text(self, ix: float, iy: float) -> None:
+        selected = self._selected
+        if selected is None or self._text_mode is None:
+            return
+        if self._text_mode == "move":
+            dx = ix - self._text_press_at[0]
+            dy = iy - self._text_press_at[1]
+            selected.points = [
+                (self._text_center[0] + dx, self._text_center[1] + dy)
+            ]
+        elif self._text_mode == "scale":
+            distance = math.hypot(
+                ix - self._text_center[0], iy - self._text_center[1]
+            )
+            factor = distance / self._text_distance
+            selected.font_px = max(6, int(round(self._text_font * factor)))
+        elif self._text_mode == "rotate":
+            current = angle_deg(
+                self._text_center[0], self._text_center[1], ix, iy
+            )
+            selected.rotation = self._text_rotation + (current - self._text_angle)
+        self.update()
+
+    def _tool_style(self, tool: Tool) -> tuple[str, float]:
+        if tool is Tool.HIGHLIGHT:
+            return self._color or self._ann_cfg["highlight_color"], float(
+                self._width or self._ann_cfg["highlight_width"])
+        if tool is Tool.MOSAIC:
+            # The mosaic never paints its own colour; it samples the picture.
+            return self._ann_cfg["stroke_color"], float(
+                self._width or self._ann_cfg["mosaic_brush"])
+        return self._color or self._ann_cfg["stroke_color"], float(
+            self._width or self._ann_cfg["stroke_width"])
 
     def _hits_close_button(self, pos: QPointF) -> bool:
         centre = self.close_button_center()
@@ -312,8 +613,23 @@ class FloatWindow(QWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position().toPoint()
 
+        if self._text_mode is not None:
+            ix, iy, _ = self._image_point(event.position())
+            self._drag_text(ix, iy)
+            return
+
+        if self._pending is not None:
+            ix, iy, _ = self._image_point(event.position())
+            self._pending.points.append((ix, iy))
+            self.update()
+            return
+
         if self._press_pos is None:
             # Not dragging: just reflect what the cursor is over.
+            if self._drawing_tool_active() and self._image_point(
+                    event.position())[2]:
+                self.setCursor(self._annotation_cursor(event.position()))
+                return
             edge = self._edge_at(pos)
             if self._hits_close_button(event.position()):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -321,11 +637,27 @@ class FloatWindow(QWidget):
                 self.setCursor(_CURSORS.get(edge, Qt.CursorShape.ArrowCursor))
             return
 
+        if (event.globalPosition().toPoint() - self._press_pos).manhattanLength() > 3:
+            self._dragged = True
         delta = event.globalPosition().toPoint() - self._press_pos
         if self._active_edge == Edge.NONE:
             self._drag_by(delta)
         else:
             self._resize_by(delta, event.modifiers())
+
+    def _annotation_cursor(self, pos: QPointF) -> Qt.CursorShape:
+        if self._tool is not Tool.TEXT:
+            return Qt.CursorShape.CrossCursor
+        ix, iy, _ = self._image_point(pos)
+        handle = self._handle_at(ix, iy)
+        if handle == "rotate":
+            return Qt.CursorShape.CrossCursor
+        if handle is not None:
+            return Qt.CursorShape.SizeFDiagCursor
+        if self._inside_selection(ix, iy) or self._text_at(ix, iy) is not None:
+            return Qt.CursorShape.SizeAllCursor
+        return Qt.CursorShape.CrossCursor
+
 
     def _drag_by(self, delta: QPoint) -> None:
         assert self._press_geom is not None
@@ -387,26 +719,242 @@ class FloatWindow(QWidget):
         self.setGeometry(x, y, w, h)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._text_mode is not None:
+            self._text_mode = None
+            self.update()
+            return
+
+        if self._pending is not None:
+            # A plain click with a shape tool makes a zero-size mark, which
+            # is noise; only a real gesture is committed.
+            pending, self._pending = self._pending, None
+            if len(pending.points) >= 2:
+                self._doc.add(pending)
+                self._after_change()
+            else:
+                self.update()
+            return
+
+        was_press = self._press_pos is not None
+        dragged = self._dragged
         self._press_pos = None
         self._press_geom = None
         self._active_edge = Edge.NONE
+
+        # A click that never turned into a drag toggles the toolbar, which is
+        # how the editor is opened from an idle floating window.
+        if was_press and not dragged:
+            self._toggle_toolbar()
+
+    # -- context menu -----------------------------------------------------
+
+    def _show_context_menu(self, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        act_copy = menu.addAction("复制到剪切板")
+        act_save = menu.addAction("另存为…")
+        menu.addSeparator()
+        act_close = menu.addAction("关闭")
+
+        act_copy.triggered.connect(self._copy_to_clipboard)
+        act_save.triggered.connect(self._save_as)
+        act_close.triggered.connect(self.close)
+
+        menu.exec(global_pos)
+
+    def _copy_to_clipboard(self) -> None:
+        QGuiApplication.clipboard().setPixmap(self._composite())
+
+    def _save_as(self) -> None:
+        """Ask for a destination, then write the composite picture there.
+
+        The default name is timestamped so repeated saves do not overwrite
+        each other, and PNG is the default format because it is lossless --
+        a screenshot is exactly the kind of image where JPEG artefacts show.
+        """
+        default = QDateTime.currentDateTime().toString("yyyyMMdd-HHmmss") + ".png"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "另存为",
+            default,
+            "PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;BMP 图片 (*.bmp)",
+        )
+        if not path:
+            return
+        if not self._composite().save(path):
+            QMessageBox.warning(self, "FloatShot", f"保存失败：{path}")
+
+    def _composite(self) -> QPixmap:
+        """The picture with every annotation burned in, at full size."""
+        return QPixmap.fromImage(self._renderer.flatten(self._doc.items))
+
+    def _toggle_ai_bar(self) -> None:
+        """Show/hide the single-line AI bar under this window."""
+        if self._ai_bar is None:
+            self._ai_bar = AiBar(self._config, self._composite())
+            self._ai_bar.resized.connect(self._position_ai_bar)
+        else:
+            self._ai_bar.set_image(self._composite())
+        if self._ai_bar.isVisible():
+            self._ai_bar.hide()
+            return
+        self._position_ai_bar()
+        self._ai_bar.show()
+        self._ai_bar.raise_()
+
+    def _position_ai_bar(self) -> None:
+        """Hang the AI bar under the window, or under the toolbar if shown."""
+        bar = self._ai_bar
+        if bar is None:
+            return
+        gap = int(self._config.get("toolbar", "gap"))
+        anchor_bottom = self.y() + self.height()
+        if self._toolbar is not None and self._toolbar.isVisible():
+            anchor_bottom = self._toolbar.y() + self._toolbar.height()
+        size = bar.size()
+        x = self.x() + (self.width() - size.width()) // 2
+        y = anchor_bottom + gap
+
+        screen = self.screen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left(), min(x, area.right() - size.width() + 1))
+            y = max(area.top(), min(y, area.bottom() - size.height() + 1))
+        bar.move(x, y)
+
+    # -- annotation / toolbar ---------------------------------------------
+
+    def _after_change(self) -> None:
+        self._sync_toolbar()
+        self.update()
+
+    def _sync_toolbar(self) -> None:
+        if self._toolbar is not None:
+            self._toolbar.set_history(self._doc.can_undo, self._doc.can_redo)
+
+    def _toggle_toolbar(self) -> None:
+        if self._toolbar is not None and self._toolbar.isVisible():
+            self._hide_toolbar()
+        else:
+            self._show_toolbar()
+
+    def _show_toolbar(self) -> None:
+        if self._toolbar is None:
+            self._toolbar = EditorToolbar(self._config, self)
+            self._toolbar.tool_changed.connect(self._on_tool_changed)
+            self._toolbar.color_changed.connect(self._on_color_changed)
+            self._toolbar.width_changed.connect(self._on_width_changed)
+            self._toolbar.ai_requested.connect(self._toggle_ai_bar)
+            self._toolbar.undo_requested.connect(self._undo)
+            self._toolbar.redo_requested.connect(self._redo)
+            self._toolbar.save_requested.connect(self._save_as)
+            self._toolbar.close_requested.connect(self._hide_toolbar)
+            self._toolbar.set_color(
+                self._color or str(self._ann_cfg["stroke_color"])
+            )
+            self._toolbar.set_width(
+                int(self._width or self._ann_cfg["stroke_width"])
+            )
+        self._sync_toolbar()
+        self._toolbar.adjustSize()
+        self._position_toolbar()
+        self._toolbar.show()
+        self._toolbar.raise_()
+        self._position_ai_bar()
+
+    def _hide_toolbar(self) -> None:
+        if self._toolbar is not None:
+            self._toolbar.hide()
+            self._toolbar.set_active_tool(None)
+        self._tool = None
+        self._selected = None
+        self._text_mode = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._position_ai_bar()
+
+    def _position_toolbar(self) -> None:
+        """Hang the bar just under the picture, kept on screen."""
+        if self._toolbar is None:
+            return
+        gap = int(self._config.get("toolbar", "gap"))
+        size = self._toolbar.size()
+        x = self.x() + (self.width() - size.width()) // 2
+        y = self.y() + self.height() + gap
+
+        screen = self.screen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left(), min(x, area.right() - size.width() + 1))
+            if y + size.height() > area.bottom():
+                # No room below: flip above, then clamp.
+                y = self.y() - gap - size.height()
+            y = max(area.top(), min(y, area.bottom() - size.height() + 1))
+        self._toolbar.move(x, y)
+
+    def _on_tool_changed(self, tool: Tool | None) -> None:
+        self._tool = tool
+        if tool is not Tool.TEXT:
+            self._selected = None
+            self._text_mode = None
+        if tool is None:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _on_color_changed(self, colour: str) -> None:
+        """Adopt a picked colour, and re-colour the selected mark right away.
+
+        Re-colouring the selection is what makes the palette feel like it is
+        editing "the thing I just added" rather than only setting the next
+        stroke.
+        """
+        self._color = colour
+        if self._selected is not None:
+            self._selected.color = colour
+        self.update()
+
+    def _on_width_changed(self, width: int) -> None:
+        self._width = float(width)
+
+    def _undo(self) -> None:
+        self._doc.undo()
+        self._after_change()
+
+    def _redo(self) -> None:
+        self._doc.redo()
+        self._after_change()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         self._metrics = self._metrics_for(
             max(1, self.width() - 2 * self._pad),
             max(1, self.height() - 2 * self._pad),
         )
+        self._position_toolbar()
+        self._position_ai_bar()
         super().resizeEvent(event)
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        self._position_toolbar()
+        self._position_ai_bar()
+        super().moveEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """The single point that announces closure, however it was triggered."""
         self._close_anim.stop()
+        if self._toolbar is not None:
+            self._toolbar.hide()
+        if self._ai_bar is not None:
+            self._ai_bar.close()
         self.closed.emit(self)
         super().closeEvent(event)
         self.deleteLater()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
+            # Esc first backs out of annotation; only an idle window closes,
+            # so a stray Esc cannot destroy a screenshot mid-edit.
+            if self._drawing_tool_active():
+                self._hide_toolbar()
+                return
             self.close()   # closeEvent is the single place that emits `closed`
             return
         super().keyPressEvent(event)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QRect, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import DPI_AWARENESS_STATUS
@@ -15,6 +15,7 @@ from .hotkey import GlobalHotkey
 from .hotkey_spec import HotkeyParseError, parse_hotkey
 from .metrics import compute_metrics
 from .overlay import SelectionOverlay
+from .settings_window import SettingsWindow
 from .tray import Tray
 
 
@@ -36,12 +37,23 @@ class FloatShotApp(QObject):
         self._activation_timer.timeout.connect(self._retry_activation)
 
         self._tray = Tray(config, self)
-        self._tray.capture_requested.connect(self.start_capture)
-        self._tray.diagnostics_requested.connect(self.show_diagnostics)
-        self._tray.quit_requested.connect(self.quit)
 
         self._hotkey = GlobalHotkey(self)
         self._hotkey.activated.connect(self.start_capture)
+
+        # The configuration window is the main interface. It edits the shared
+        # Config directly and signals back for the few live side effects.
+        # Parentless: it is a top-level window, not a child of this QObject.
+        self._settings = SettingsWindow(config)
+        self._settings.capture_requested.connect(self.start_capture)
+        self._settings.diagnostics_requested.connect(self.show_diagnostics)
+        self._settings.hotkey_changed.connect(self._apply_hotkey)
+        self._settings.quit_requested.connect(self.quit)
+        self._tray.open_requested.connect(self.show_settings)
+        self._tray.quit_requested.connect(self.quit)
+
+        # Whether the settings window was hidden for a capture and must return.
+        self._restore_settings = False
 
     # -- lifecycle --------------------------------------------------------
 
@@ -51,13 +63,15 @@ class FloatShotApp(QObject):
             self._tray.notify(
                 "FloatShot",
                 f"热键注册失败：{self._hotkey.last_error}\n"
-                f"可在 config.json 中修改 hotkey 后重启。",
+                f"可在配置界面中修改快捷键。",
             )
-        elif self._config.get("tray", "show_startup_message"):
-            self._tray.notify(
-                "FloatShot",
-                f"已就绪，按 {self._config.get('hotkey')} 开始截屏。",
-            )
+        # "Launching goes straight into the configuration interface."
+        self.show_settings()
+
+    def show_settings(self) -> None:
+        self._settings.show()
+        self._settings.raise_()
+        self._settings.activateWindow()
 
     def _register_hotkey(self) -> bool:
         spec = str(self._config.get("hotkey"))
@@ -67,6 +81,14 @@ class FloatShotApp(QObject):
             self._hotkey.last_error = str(exc)
             return False
         return self._hotkey.register(hotkey)
+
+    def _apply_hotkey(self, spec: str) -> None:
+        """Register a hotkey the settings window just stored."""
+        if self._register_hotkey():
+            self._settings.show_hotkey_status(True, f"已生效：{spec}")
+        else:
+            self._settings.show_hotkey_status(
+                False, f"注册失败：{self._hotkey.last_error}")
 
     def quit(self) -> None:
         self._hotkey.unregister()
@@ -86,8 +108,17 @@ class FloatShotApp(QObject):
         if self._overlay is not None:
             return  # a selection is already in progress
 
+        # The settings window is the main interface now, so it would end up
+        # inside every screenshot unless it gets out of the way first. Hide
+        # it and let the paint settle before grabbing.
+        if self._settings.isVisible():
+            self._restore_settings = True
+            self._settings.hide()
+            self._app.processEvents()
+
         canvas, origin = grab_virtual_desktop()
         if canvas.isNull():
+            self._restore_settings_window()
             self._tray.notify("FloatShot", "抓屏失败：未获取到画面。")
             return
 
@@ -171,6 +202,12 @@ class FloatShotApp(QObject):
             self._overlay.hide()
             self._overlay.deleteLater()
             self._overlay = None
+        self._restore_settings_window()
+
+    def _restore_settings_window(self) -> None:
+        if self._restore_settings:
+            self._restore_settings = False
+            self.show_settings()
 
     def _on_selected(self, region: QRect) -> None:
         if self._pending is None:
@@ -184,6 +221,11 @@ class FloatShotApp(QObject):
         shot = crop(canvas, region, origin)
         if shot.isNull() or shot.width() < 2 or shot.height() < 2:
             return
+
+        if self._config.get("capture", "copy_to_clipboard"):
+            # QQ-style convenience: the region is on the clipboard before the
+            # user even looks at the floating window.
+            QGuiApplication.clipboard().setPixmap(shot)
 
         window = FloatWindow(shot, self._config)
         window.closed.connect(self._on_window_closed)
@@ -201,7 +243,17 @@ class FloatShotApp(QObject):
     # -- diagnostics -------------------------------------------------------
 
     def show_diagnostics(self) -> None:
-        """Show the values that cannot be verified on a single-DPI machine.
+        box = QMessageBox(self._settings)
+        box.setWindowTitle("FloatShot 诊断信息")
+        box.setText(self.diagnostics_text())
+        box.setIcon(QMessageBox.Icon.Information)
+        # Stay above the floating windows, otherwise the windows being
+        # diagnosed would cover the report.
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.exec()
+
+    def diagnostics_text(self) -> str:
+        """The values that cannot be verified on a single-DPI machine.
 
         This is the check to run on a 125% / 150% display before handing the
         build to someone else: the DPI figure must match that display's
@@ -225,12 +277,14 @@ class FloatShotApp(QObject):
         )
 
         geo = virtual_geometry()
-        text = "\n".join([
+        return "\n".join([
             f"DPI 感知声明：{DPI_AWARENESS_STATUS}",
             f"系统 DPI：{dpi_value}",
             f"缩放因子：{scale:.3f}  ({scale * 100:.0f}%)",
             "",
             f"热键：{self._config.get('hotkey')}",
+            f"截图后复制到剪贴板："
+            f"{'开' if self._config.get('capture', 'copy_to_clipboard') else '关'}",
             "",
             f"虚拟桌面：{geo.width()} x {geo.height()}  @ ({geo.x()}, {geo.y()})",
             "",
@@ -245,12 +299,3 @@ class FloatShotApp(QObject):
             "",
             f"悬浮窗数量：{len(self._windows)}",
         ])
-
-        box = QMessageBox()
-        box.setWindowTitle("FloatShot 诊断信息")
-        box.setText(text)
-        box.setIcon(QMessageBox.Icon.Information)
-        # Stay above the floating windows, otherwise the windows being
-        # diagnosed would cover the report.
-        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        box.exec()

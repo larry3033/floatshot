@@ -1,0 +1,2 @@
+# Build-time only. The runtime dependency is PySide6 (see requirements.txt).
+pyinstaller>=6.0

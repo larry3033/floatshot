@@ -21,11 +21,12 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
 
     config = Config.load(Config.default_path())
-    if config.recovered:
-        print("config.json was missing or unreadable; recreated with defaults.")
+    # A windowed (--noconsole) build has no stdout to print to.
+    if config.recovered and sys.stdout is not None:
+        print("config.json 缺失或损坏，已用默认值重建。", flush=True)
 
     float_shot = FloatShotApp(app, config)
-    float_shot.start()
+    float_shot.start()   # shows the tray and drops into the console menu
     return app.exec()
 
 
